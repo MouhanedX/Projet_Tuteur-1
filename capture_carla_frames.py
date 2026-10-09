@@ -17,7 +17,6 @@ FX = W / (2.0 * math.tan(math.radians(FOV) / 2.0))
 WEATHERS = ("ClearNoon", "CloudySunset", "SoftRainNoon")
 CLASS_SCENARIOS = (tuple(range(0, 14)), tuple(range(14, 28)), tuple(range(28, 43)))
 MIN_DISTANCE, MAX_DISTANCE, MIN_PIXELS = 8.0, 45.0, 14.0
-FACE_Z, HALF_WIDTH = 1.30, 0.46
 CAPTURE_EVERY_TICKS = 3
 
 
@@ -41,6 +40,55 @@ def project(points, camera_transform):
     right = delta @ np.array((right_vector.x, right_vector.y, right_vector.z))
     up = delta @ np.array((up_vector.x, up_vector.y, up_vector.z))
     return np.stack((W / 2 + FX * right / forward, H / 2 - FX * up / forward), 1)
+
+
+def sign_face_quad(actor, camera_location):
+    """Return the visible rectangular face of the actual CARLA sign mesh."""
+    actor_transform = actor.get_transform()
+    bounds = actor.bounding_box
+    forward = actor_transform.get_forward_vector()
+    right = actor_transform.get_right_vector()
+    up = actor_transform.get_up_vector()
+    basis = (
+        np.array((forward.x, forward.y, forward.z), dtype=np.float64),
+        np.array((right.x, right.y, right.z), dtype=np.float64),
+        np.array((up.x, up.y, up.z), dtype=np.float64),
+    )
+    local_center = np.array((
+        bounds.location.x,
+        bounds.location.y,
+        bounds.location.z,
+    ), dtype=np.float64)
+    world_center = np.array((
+        actor_transform.location.x,
+        actor_transform.location.y,
+        actor_transform.location.z,
+    )) + sum(axis * value for axis, value in zip(basis, local_center))
+    extents = np.array((bounds.extent.x, bounds.extent.y, bounds.extent.z))
+
+    # The board plane uses the larger horizontal local extent. The smaller
+    # horizontal extent is its thickness and therefore its face normal.
+    horizontal_index = 0 if extents[0] >= extents[1] else 1
+    normal_index = 1 - horizontal_index
+    horizontal = basis[horizontal_index]
+    normal = basis[normal_index]
+    half_width = extents[horizontal_index]
+    half_height = extents[2]
+    toward_camera = np.asarray((
+        camera_location.x - world_center[0],
+        camera_location.y - world_center[1],
+        camera_location.z - world_center[2],
+    ))
+    if np.dot(normal, toward_camera) < 0:
+        normal = -normal
+    face_center = world_center + normal * extents[normal_index]
+    vertical = basis[2]
+    return face_center + np.array((
+        -horizontal * half_width + vertical * half_height,
+        horizontal * half_width + vertical * half_height,
+        horizontal * half_width - vertical * half_height,
+        -horizontal * half_width - vertical * half_height,
+    ))
 
 
 def make_route(world):
@@ -90,14 +138,9 @@ def spawn_signs(world, route, classes):
     for cls, transform in zip(classes, candidates):
         actor = world.try_spawn_actor(blueprint, transform)
         if actor:
-            yaw = math.radians(transform.rotation.yaw)
-            horizontal = np.array((math.cos(yaw), math.sin(yaw), 0.0)) * HALF_WIDTH
             signs.append({
                 "actor": actor,
                 "class": cls,
-                "center": np.array((transform.location.x, transform.location.y,
-                                    transform.location.z + FACE_Z)),
-                "horizontal": horizontal,
             })
     if len(signs) != len(classes):
         raise RuntimeError(
@@ -250,21 +293,16 @@ def main():
                         # camera basis depending on the CARLA client version.
                         camera_transform = camera.get_transform()
                         visible = []
+                        camera_location = camera_transform.location
                         for sign in signs:
-                            quad3d = sign["center"] + np.array([
-                                -sign["horizontal"] + (0, 0, HALF_WIDTH),
-                                sign["horizontal"] + (0, 0, HALF_WIDTH),
-                                sign["horizontal"] - (0, 0, HALF_WIDTH),
-                                -sign["horizontal"] - (0, 0, HALF_WIDTH),
-                            ])
+                            quad3d = sign_face_quad(sign["actor"], camera_location)
                             quad = project(quad3d, camera_transform)
-                            distance = float(np.linalg.norm(
-                                sign["center"] - np.array((
-                                    camera_transform.location.x,
-                                    camera_transform.location.y,
-                                    camera_transform.location.z,
-                                ))
-                            ))
+                            face_center = quad3d.mean(axis=0)
+                            distance = float(np.linalg.norm(face_center - np.array((
+                                camera_location.x,
+                                camera_location.y,
+                                camera_location.z,
+                            ))))
                             if quad is None:
                                 rejected["behind"] += 1
                                 continue

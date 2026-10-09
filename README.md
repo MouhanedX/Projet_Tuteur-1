@@ -197,7 +197,10 @@ SoftRainNoon
 ```
 
 Les panneaux sont placés sur le bord de la route, hors jonction lorsque
-possible, avec un contrôle du sol par raycast. Les images sont gardées lorsque
+possible, avec un contrôle du sol par raycast. La face utilisée pour la
+projection n'est pas une dimension fixe : elle est calculée à partir du
+`bounding_box` CARLA de chaque panneau, avec le côté visible orienté vers la
+caméra. Les images sont gardées lorsque
 le panneau est :
 
 ```text
